@@ -31,6 +31,7 @@ import re
 import ast
 import math
 import os
+import copy
 from utils import log, langmgr, ui, webhook_cache as wcache, platform_base, restrictions as r
 import importlib
 import emoji as pymoji
@@ -279,9 +280,6 @@ class UnifierBridge:
         }
         self.alert = UnifierAlert
 
-        # This is a developer-only value. Please leave this as is.
-        self.moderator_override = True
-
     @property
     def room_template(self):
         return self.__room_template
@@ -474,20 +472,20 @@ class UnifierBridge:
             support = self.__bot.platforms[platform]
 
         for room in self.rooms:
-            roominfo = self.get_room(room)
+            __roominfo = copy.copy(self.get_room(room))
 
-            if not platform in roominfo.keys():
+            if not platform in __roominfo.keys():
                 continue
 
             if platform=='discord':
-                if not f'{channel.guild.id}' in roominfo['discord'].keys():
+                if not f'{channel.guild.id}' in __roominfo['discord'].keys():
                     continue
-                if channel.id in roominfo['discord'][f'{channel.guild.id}']:
+                if channel.id in __roominfo['discord'][f'{channel.guild.id}']:
                     return room
             else:
-                if not f'{support.get_id(support.server(channel))}' in roominfo[platform].keys():
+                if not f'{support.get_id(support.server(channel))}' in __roominfo[platform].keys():
                     continue
-                if support.get_id(channel) in roominfo[platform][f'{support.get_id(support.server(channel))}']:
+                if support.get_id(channel) in __roominfo[platform][f'{support.get_id(support.server(channel))}']:
                     return room
         return False
 
@@ -495,22 +493,22 @@ class UnifierBridge:
         """Gets a Unifier room.
         This will be moved to UnifierBridge for a future update."""
         try:
-            roominfo = self.__bot.db['rooms'][room]
+            __roominfo = self.__bot.db['rooms'][room]
             base = {'meta': dict(self.__room_template)}
 
             # add template keys and values to data
-            for key in roominfo.keys():
+            for key in __roominfo.keys():
                 if key == 'meta':
-                    for meta_key in roominfo['meta'].keys():
+                    for meta_key in __roominfo['meta'].keys():
                         if meta_key == 'private_meta':
-                            for pmeta_key in roominfo['meta']['private_meta'].keys():
+                            for pmeta_key in __roominfo['meta']['private_meta'].keys():
                                 base['meta']['private_meta'].update(
-                                    {pmeta_key: roominfo['meta']['private_meta'][pmeta_key]}
+                                    {pmeta_key: __roominfo['meta']['private_meta'][pmeta_key]}
                                 )
                         else:
-                            base['meta'].update({meta_key: roominfo['meta'][meta_key]})
+                            base['meta'].update({meta_key: __roominfo['meta'][meta_key]})
                 else:
-                    base.update({key: roominfo[key]})
+                    base.update({key: __roominfo[key]})
 
             return base
         except:
@@ -520,48 +518,58 @@ class UnifierBridge:
         roominfo = self.get_room(room)
 
         if platform == 'discord':
-            manage_guild = user.guild_permissions.manage_guild
+            manage_guild = user.guild_permissions.manage_channels
+            user_id = user.id
+            guild_id = user.guild.id
         else:
             support = self.__bot.platforms[platform]
-            manage_guild = support.permissions(user).manage_server
+            manage_guild = support.permissions(user).manage_channels
+            user_id = support.get_id(user)
+            guild_id = support.get_id(support.server(user))
+
+        is_server = guild_id == roominfo['meta']['private_meta']['server']
 
         if roominfo['meta']['private']:
             if user:
-                if user.id in self.__bot.moderators and not self.moderator_override:
+                if user_id in self.__bot.moderators and not self.__bot.config['private_rooms_mod_access']:
                     return True
-            return user.guild.id == roominfo['meta']['private_meta']['server'] and manage_guild
+            return is_server and manage_guild
         else:
-            return user.id in self.__bot.admins
+            return user_id in self.__bot.admins
 
     def can_join_room(self, room, user, platform='discord') -> bool:
         roominfo = self.get_room(room)
 
         if platform == 'discord':
             manage_channels = user.guild_permissions.manage_channels
+            user_id = user.id
+            guild_id = user.guild.id
         else:
             support = self.__bot.platforms[platform]
             manage_channels = support.permissions(user).manage_channels
+            user_id = support.get_id(user)
+            guild_id = support.get_id(support.server(user))
+
+        is_server = guild_id == roominfo['meta']['private_meta']['server']
+        can_join = guild_id in roominfo['meta']['private_meta']['allowed']
 
         if roominfo['meta']['private']:
             if user:
-                if user.id in self.__bot.moderators and not self.moderator_override:
+                if user_id in self.__bot.moderators and self.__bot.config['private_rooms_mod_access']:
                     return True
-            return (
-                    user.guild.id == roominfo['meta']['private_meta']['server'] or
-                    user.guild.id in roominfo['meta']['private_meta']['allowed']
-            ) and manage_channels
+            return (is_server or can_join) and manage_channels
         else:
             return manage_channels
 
     def can_access_room(self, room, user, ignore_mod=False) -> bool:
-        roominfo = self.get_room(room)
-        if roominfo['meta']['private']:
+        __roominfo = self.get_room(room)
+        if __roominfo['meta']['private']:
             if user:
-                if user.id in self.__bot.moderators and not (self.moderator_override or ignore_mod):
+                if user.id in self.__bot.moderators and (self.__bot.config['private_rooms_mod_access'] and not ignore_mod):
                     return True
             return (
-                    user.guild.id == roominfo['meta']['private_meta']['server'] or
-                    user.guild.id in roominfo['meta']['private_meta']['allowed']
+                    user.guild.id == __roominfo['meta']['private_meta']['server'] or
+                    user.guild.id in __roominfo['meta']['private_meta']['allowed']
             )
         else:
             return True
@@ -607,21 +615,26 @@ class UnifierBridge:
         if not room in self.rooms:
             raise self.RoomNotFoundError('invalid room')
 
+        roomname = str(room)
+
         room = self.get_room(room)
         for invite in room['meta']['private_meta']['invites']:
-            self.delete_invite(invite)
+            try:
+                self.delete_invite(invite)
+            except:
+                pass
 
         try:
             if (
-                    room['meta']['private_meta']['server'] and
-                    self.__bot.db['rooms_count'][room['meta']['private_meta']['server']] > 0
+                    (room['meta']['private_meta']['server']) and
+                    (self.__bot.db['rooms_count'][room['meta']['private_meta']['server']] > 0)
             ):
                 self.__bot.db['rooms_count'][room['meta']['private_meta']['server']] -= 1
         except:
             # not something to worry about
             pass
 
-        self.__bot.db['rooms'].pop(room)
+        self.__bot.db['rooms'].pop(roomname)
         self.__bot.db.save_data()
 
     def get_invite(self, invite) -> dict or None:
@@ -685,7 +698,7 @@ class UnifierBridge:
             user_id = support.get_id(user)
         if (
                 str(server_id) in roominfo['meta']['banned']
-        ) and (not user_id in self.__bot.moderators and not self.moderator_override):
+        ) and (not user_id in self.__bot.moderators and not self.__bot.config['private_rooms_mod_access']):
             raise self.RoomBannedError('banned from room')
         if invite['remaining'] == 1:
             self.delete_invite(invite)
@@ -719,14 +732,14 @@ class UnifierBridge:
 
         if (
                 str(guild_id) in roominfo['meta']['banned']
-        ) and (not user_id in self.__bot.moderators and not self.moderator_override):
+        ) and (not user_id in self.__bot.moderators and not self.__bot.config['private_rooms_mod_access']):
             raise self.RoomBannedError('banned from room')
 
         if roominfo['meta']['private']:
             if (
                     not guild_id in roominfo['meta']['private_meta']['allowed'] and
                     not guild_id == roominfo['meta']['private_meta']['server']
-            ) and (not user_id in self.__bot.moderators and not self.moderator_override):
+            ) and (not user_id in self.__bot.moderators and not self.__bot.config['private_rooms_mod_access']):
                 raise ValueError('forbidden')
 
         guild_id = str(guild_id)

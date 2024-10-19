@@ -92,23 +92,21 @@ class Config(commands.Cog, name=':construction_worker: Config'):
             except:
                 return False
 
-        roominfo = self.bot.bridge.get_room(room)
-        if not roominfo:
+        __roominfo = self.bot.bridge.get_room(room)
+        if not __roominfo:
             return False
 
-        if roominfo['meta']['private']:
+        is_server = str(user.guild.id) == __roominfo['meta']['private_meta']['server']
+        is_moderator = user.id in self.bot.moderators
+        is_admin = user.id in self.bot.admins
+        is_owner = user.id == self.bot.owner or user.id in self.bot.other_owners
+
+        if __roominfo['meta']['private']:
             return (
-                    user.guild_permissions.manage_channels and user.guild.id == roominfo['meta']['private_meta']['server']
-            ) or (
-                    user.id in self.bot.moderators or
-                    user.id in self.bot.admins or
-                    user.id == self.bot.owner
-            )
+                    user.guild_permissions.manage_channels and is_server
+            ) or ((is_moderator and self.bot.config['private_rooms_mod_access']) or is_admin or is_owner)
         else:
-            return (
-                    user.id in self.bot.admins or
-                    user.id == self.bot.owner
-            )
+            return is_admin or is_owner
 
     def can_moderate(self, user, room):
         room = room.lower()
@@ -118,23 +116,21 @@ class Config(commands.Cog, name=':construction_worker: Config'):
             except:
                 return False
 
-        roominfo = self.bot.bridge.get_room(room)
-        if not roominfo:
+        __roominfo = self.bot.bridge.get_room(room)
+        if not __roominfo:
             return False
 
-        if roominfo['meta']['private']:
+        is_server = str(user.guild.id) == __roominfo['meta']['private_meta']['server']
+        is_moderator = user.id in self.bot.moderators
+        is_admin = user.id in self.bot.admins
+        is_owner = user.id == self.bot.owner or user.id in self.bot.other_owners
+
+        if __roominfo['meta']['private']:
             return (
-                    user.guild_permissions.ban_members and user.guild.id == roominfo['meta']['private_meta']['server']
-            ) or (
-                    user.id in self.bot.moderators or
-                    user.id in self.bot.admins or
-                    user.id == self.bot.owner
-            )
+                    user.guild_permissions.ban_members and is_server
+            ) or ((is_moderator and self.bot.config['private_rooms_mod_access']) or is_admin or is_owner)
         else:
-            return (
-                    user.id in self.bot.admins or
-                    user.id == self.bot.owner
-            )
+            return is_admin or is_owner
 
     def can_join(self, user, room):
         room = room.lower()
@@ -145,15 +141,15 @@ class Config(commands.Cog, name=':construction_worker: Config'):
             except:
                 return False
 
-        roominfo = self.bot.bridge.get_room(room)
-        if not roominfo:
+        __roominfo = self.bot.bridge.get_room(room)
+        if not __roominfo:
             return False
 
-        if roominfo['meta']['private']:
-            return (
-                    user.guild.id in roominfo['meta']['private_meta']['allowed'] or
-                    user.guild.id == roominfo['meta']['private_meta']['server']
-            )
+        is_server = str(user.guild.id) == __roominfo['meta']['private_meta']['server']
+        is_allowed = user.guild.id in __roominfo['meta']['private_meta']['allowed']
+
+        if __roominfo['meta']['private']:
+            return is_server or is_allowed
         else:
             return True
 
@@ -323,7 +319,7 @@ class Config(commands.Cog, name=':construction_worker: Config'):
                         ),
                         nextcord.ui.Button(
                             style=nextcord.ButtonStyle.green,
-                            label=selector.rawget("search","commons.seacrh"),
+                            label=selector.rawget("search","commons.search"),
                             custom_id='search',
                             emoji=self.bot.ui_emojis.search,
                             disabled=selection.disabled
@@ -759,10 +755,10 @@ class Config(commands.Cog, name=':construction_worker: Config'):
             mod = f'@{username}'
         await ctx.send(f'{self.bot.ui_emojis.success} {selector.fget("success",values={"mod":mod})}')
 
-    @commands.command(hidden=True, aliases=['newroom'],description='Creates a new room.')
+    @commands.command(name='create-room', hidden=True, aliases=['newroom'], description='Creates a new room.')
     @restrictions.can_create()
     @restrictions.not_banned()
-    async def make(self,ctx,*,room=None):
+    async def create_room(self,ctx,*,room=None):
         roomtype = 'private'
         dry_run = False
         
@@ -772,7 +768,7 @@ class Config(commands.Cog, name=':construction_worker: Config'):
             if room.startswith('-dry-run'):
                 if room == '-dry-run':
                     room = None
-                dry_run = ctx.author.id == self.bot.owner
+                dry_run = ctx.author.id == self.bot.owner or ctx.author.id in self.bot.other_owners
 
         if room:
             room = room.lower().replace(' ','-')
@@ -1187,8 +1183,8 @@ class Config(commands.Cog, name=':construction_worker: Config'):
         if interaction.data['custom_id'] == 'cancel':
             return await interaction.response.edit_message(view=view)
 
-        self.bot.db['rooms'].pop(room)
-        embed.title = f'{self.bot.ui_emojis.success} {selector.fget("success_body",values={"room":room})}'
+        self.bot.bridge.delete_room(room)
+        embed.title = f'{self.bot.ui_emojis.success} {selector.fget("success_title",values={"room":room})}'
         embed.description = selector.get("success_body")
         embed.colour = self.bot.colors.success
         await interaction.response.edit_message(embed=embed,view=None)
@@ -1212,12 +1208,14 @@ class Config(commands.Cog, name=':construction_worker: Config'):
             except:
                 raise restrictions.UnknownRoom()
 
+        mod_access = ctx.author.id in self.bot.moderators and self.bot.config['private_rooms_mod_access']
+
         if not invite:
             room = room.lower()
             if not room in self.bot.bridge.rooms:
                 raise restrictions.UnknownRoom()
 
-            if not self.can_join(ctx.author, room):
+            if not self.can_join(ctx.author, room) and not mod_access:
                 raise restrictions.NoRoomJoin()
             roomname = room
         else:
@@ -1247,7 +1245,6 @@ class Config(commands.Cog, name=':construction_worker: Config'):
             embed.description = selector.fget("already_linked_body",values={"room":duplicate,"prefix":self.bot.command_prefix})
             return await msg.edit(embed=embed)
 
-        'Join {}?'
         embed = nextcord.Embed(
             title=f'{self.bot.ui_emojis.rooms} {selector.fget("join_title",values={"roomname":roominfo["meta"]["display_name"] or roomname})}',
             description=f'{text}\n\n{selector.get("display")}',
